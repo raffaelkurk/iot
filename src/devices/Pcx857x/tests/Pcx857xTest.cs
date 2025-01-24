@@ -42,7 +42,7 @@ namespace Iot.Device.Pcx857x.Tests
             {
                 Device = device;
                 ChipMock = chipMock;
-                Controller = new GpioController(PinNumberingScheme.Logical, Device);
+                Controller = new GpioController(Device);
             }
         }
 
@@ -160,6 +160,8 @@ namespace Iot.Device.Pcx857x.Tests
 
                 return PinValue.Low;
             }
+
+            protected override void Toggle(int pinNumber) => Write(pinNumber, !Read(pinNumber));
 
             public void Read(Span<PinValuePair> pinValues)
             {

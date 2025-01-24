@@ -17,8 +17,9 @@
     <PackageReference Include="Microsoft.DotNet.GenAPI" Version="$(MicrosoftDotNetGenApiPackageVersion)">
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
+    <Content Include="$(RepoRoot)README-nuget.md" Pack="true" Visible="false" PackagePath="\README.md" />
   </ItemGroup>
-
+  
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
     <PackageReference Include="Microsoft.Win32.Registry" Version="$(MicrosoftWin32RegistryPackageVersion)" /> <!-- This is Windows specific -->
     <PackageReference Include="System.Memory" Version="$(SystemMemoryPackageVersion)" />
@@ -65,6 +66,10 @@
     <Compile Remove="System\Device\Pwm\PwmChannel.Windows.cs" />
     <Compile Remove="System\Device\Spi\SpiDevice.Windows.cs" />
 
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net6.0'">
+    <!-- Need this for record support in older runtimes -->
+    <Compile Remove="System\Device\IsExternalInit.cs" />
   </ItemGroup>
 
 </Project>

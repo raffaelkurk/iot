@@ -5,13 +5,13 @@ using System;
 using System.Device.Gpio;
 using System.Device.I2c;
 using System.Device.Spi;
+using System.Drawing;
 using CharacterLcd.Samples;
 using Iot.Device.Arduino;
 using Iot.Device.Mcp23xxx;
 using Iot.Device.CharacterLcd;
 using Iot.Device.CharacterLcd.Samples;
 using Iot.Device.Multiplexing;
-using SixLabors.ImageSharp;
 
 // Choose the right setup for your display:
 // UsingGpioPins();
@@ -36,7 +36,7 @@ void UsingMcp()
     int registerSelectPin = 1;
     int enablePin = 2;
     int backlight = 7;
-    using Lcd1602 lcd = new Lcd1602(registerSelectPin, enablePin, dataPins, backlight, controller: new GpioController(PinNumberingScheme.Logical, driver));
+    using Lcd1602 lcd = new Lcd1602(registerSelectPin, enablePin, dataPins, backlight, controller: new GpioController(driver));
     lcd.Clear();
 
     lcd.Write("Hello World");

@@ -28,14 +28,14 @@ public abstract class GpioControllerTestBase
     [InlineData(false)]
     public void PinValueStaysSameAfterDispose(bool closeAsHigh)
     {
-        var driver = GetTestDriver();
+        using var driver = GetTestDriver();
         if (driver is SysFsDriver)
         {
             // This check fails on the SysFsDriver, because it always sets the value to 0 when the pin is opened (but on close, the value does stay high)
             return;
         }
 
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), driver))
+        using (GpioController controller = new GpioController(driver))
         {
             controller.OpenPin(OutputPin, PinMode.Output);
             controller.OpenPin(InputPin, PinMode.Input);
@@ -44,7 +44,7 @@ public abstract class GpioControllerTestBase
             Assert.Equal(closeAsHigh, controller.Read(InputPin));
         }
 
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             controller.OpenPin(InputPin, PinMode.Input);
             Assert.Equal(closeAsHigh, controller.Read(InputPin));
@@ -54,7 +54,7 @@ public abstract class GpioControllerTestBase
     [Fact]
     public void PinValueReadAndWrite()
     {
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             controller.OpenPin(OutputPin, PinMode.Output);
             controller.OpenPin(InputPin, PinMode.Input);
@@ -73,7 +73,7 @@ public abstract class GpioControllerTestBase
     [Fact]
     public void PinCanChangeStateWhileItIsOpen()
     {
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             controller.OpenPin(OutputPin, PinMode.Input);
             Thread.SpinWait(100);
@@ -87,7 +87,7 @@ public abstract class GpioControllerTestBase
     [Fact]
     public void ThrowsInvalidOperationExceptionWhenPinIsNotOpened()
     {
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             Assert.Throws<InvalidOperationException>(() => controller.Write(OutputPin, PinValue.High));
             Assert.Throws<InvalidOperationException>(() => controller.Read(InputPin));
@@ -100,7 +100,7 @@ public abstract class GpioControllerTestBase
     [Fact]
     public void IsPinOpenOnInputTest()
     {
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             // Open pin in input mode (default)
             Assert.False(controller.IsPinOpen(LedPin));
@@ -115,7 +115,7 @@ public abstract class GpioControllerTestBase
     public void IsPinOpenOnOutputTest()
     {
         // Separate test to check the IsPinOpen works also when the PinMode is Output, See Bug #776
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             Assert.False(controller.IsPinOpen(LedPin));
 
@@ -135,7 +135,7 @@ public abstract class GpioControllerTestBase
     [Fact]
     public void AllowWritingOnInputPin()
     {
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             controller.OpenPin(InputPin, PinMode.Input);
             controller.Write(InputPin, PinValue.High);
@@ -145,7 +145,7 @@ public abstract class GpioControllerTestBase
     [Fact]
     public void CanReadFromOutputPin()
     {
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             controller.OpenPin(OutputPin, PinMode.Output);
 
@@ -160,7 +160,7 @@ public abstract class GpioControllerTestBase
     [Fact]
     public void ThrowsIfReadingClosedPin()
     {
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             Assert.Throws<InvalidOperationException>(() => controller.Read(OutputPin));
         }
@@ -169,7 +169,7 @@ public abstract class GpioControllerTestBase
     [Fact]
     public void ThrowsIfWritingClosedPin()
     {
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             Assert.Throws<InvalidOperationException>(() => controller.Write(OutputPin, PinValue.High));
         }
@@ -181,7 +181,7 @@ public abstract class GpioControllerTestBase
     [Trait("SkipOnTestRun", "Windows_NT")] // Currently, the Windows Driver is defaulting to InputPullDown, and it seems this cannot be changed
     public void OpenPinDefaultsModeToLastMode(PinMode modeToTest)
     {
-        var driver = GetTestDriver();
+        using var driver = GetTestDriver();
         if (driver is SysFsDriver)
         {
             // See issue #1581. There seems to be a library-version issue or some other random cause for this test to act differently on different hardware.
@@ -189,7 +189,7 @@ public abstract class GpioControllerTestBase
         }
 
         // This works for input/output on most systems, but not on pullup/down, since sometimes the hardware doesn't have read possibilities for those (ie. the Raspi 3)
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), driver))
+        using (GpioController controller = new GpioController(driver))
         {
             controller.OpenPin(OutputPin);
             controller.SetPinMode(OutputPin, modeToTest);
@@ -198,7 +198,7 @@ public abstract class GpioControllerTestBase
         }
 
         // Close controller, to make sure we're not caching
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             controller.OpenPin(OutputPin);
             Thread.Sleep(100);
@@ -210,7 +210,7 @@ public abstract class GpioControllerTestBase
     public void AddCallbackTest()
     {
         bool wasCalled = false;
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             controller.OpenPin(InputPin, PinMode.Input);
             controller.OpenPin(OutputPin, PinMode.Output);
@@ -230,9 +230,17 @@ public abstract class GpioControllerTestBase
     [Fact]
     public void AddCallbackFallingEdgeNotDetectedTest()
     {
+        using var driver = GetTestDriver();
+        if (driver is SysFsDriver)
+        {
+            // This test is unreliable (flaky) with SysFs.
+            // See https://github.com/dotnet/iot/issues/629 and possibly https://github.com/dotnet/iot/issues/1581
+            return;
+        }
+
         bool wasCalled = false;
         AutoResetEvent ev = new AutoResetEvent(false);
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(driver))
         {
             controller.OpenPin(InputPin, PinMode.Input);
             controller.OpenPin(OutputPin, PinMode.Output);
@@ -264,7 +272,7 @@ public abstract class GpioControllerTestBase
     public void AddCallbackRemoveCallbackTest()
     {
         int risingEventOccurredCount = 0, fallingEventOccurredCount = 0;
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             controller.OpenPin(InputPin, PinMode.Input);
             controller.OpenPin(OutputPin, PinMode.Output);
@@ -309,7 +317,7 @@ public abstract class GpioControllerTestBase
     [Fact]
     public void AddCallbackRemoveAllCallbackTest()
     {
-        GpioDriver testDriver = GetTestDriver();
+        using GpioDriver testDriver = GetTestDriver();
         // Skipping the test for now when using the SysFsDriver or the RaspberryPi3Driver given that this test is flaky for those drivers.
         // Issue tracking this problem is https://github.com/dotnet/iot/issues/629
         if (testDriver is SysFsDriver || testDriver is RaspberryPi3Driver)
@@ -320,7 +328,7 @@ public abstract class GpioControllerTestBase
         RetryHelper.Execute(() =>
         {
             int risingEventOccurredCount = 0, fallingEventOccurredCount = 0;
-            using (GpioController controller = new GpioController(GetTestNumberingScheme(), testDriver))
+            using (GpioController controller = new GpioController(testDriver))
             {
                 controller.OpenPin(InputPin, PinMode.Input);
                 controller.OpenPin(OutputPin, PinMode.Output);
@@ -374,7 +382,7 @@ public abstract class GpioControllerTestBase
     public void AddCallbackRemoveAllCallbackAndAddCallbackAgainTest()
     {
         int callback1FiredTimes = 0, callback2FiredTimes = 0;
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             controller.OpenPin(InputPin, PinMode.Input);
             controller.OpenPin(OutputPin, PinMode.Output);
@@ -413,7 +421,7 @@ public abstract class GpioControllerTestBase
     [Fact]
     public void WaitForEventCancelAfter10MillisecondsTest()
     {
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             CancellationTokenSource tokenSource = new CancellationTokenSource(WaitMilliseconds);
             controller.OpenPin(InputPin, PinMode.Input);
@@ -431,7 +439,7 @@ public abstract class GpioControllerTestBase
     [Fact]
     public void ThrowsIfWaitingOnClosedPin()
     {
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             Assert.Throws<InvalidOperationException>(() => controller.WaitForEvent(InputPin, PinEventTypes.Falling, CancellationToken.None));
         }
@@ -440,7 +448,7 @@ public abstract class GpioControllerTestBase
     [Fact]
     public void WaitForEventRisingEdgeTest()
     {
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             CancellationTokenSource tokenSource = new CancellationTokenSource();
             controller.OpenPin(InputPin, PinMode.Input);
@@ -465,7 +473,7 @@ public abstract class GpioControllerTestBase
     {
         TimeoutHelper.CompletesInTime(() =>
         {
-            using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+            using (GpioController controller = new GpioController(GetTestDriver()))
             {
                 CancellationTokenSource tokenSource = new CancellationTokenSource();
                 controller.OpenPin(InputPin, PinMode.Input);
@@ -488,9 +496,9 @@ public abstract class GpioControllerTestBase
     }
 
     [Fact]
-    public void WaitForEventBothEdgesTest()
+    public async Task WaitForEventBothEdgesTest()
     {
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             CancellationTokenSource tokenSource = new CancellationTokenSource();
             tokenSource.CancelAfter(2000);
@@ -521,7 +529,7 @@ public abstract class GpioControllerTestBase
             result = controller.WaitForEvent(InputPin, PinEventTypes.Falling | PinEventTypes.Rising, tokenSource.Token);
             Assert.False(result.TimedOut);
             Assert.Equal(PinEventTypes.Rising, result.EventTypes);
-            Assert.True(task.Wait(TimeSpan.FromSeconds(30))); // Should end long before that
+            await task.WaitAsync(TimeSpan.FromSeconds(30)); // Should end long before that
             tokenSource.Dispose();
         }
     }
@@ -538,7 +546,7 @@ public abstract class GpioControllerTestBase
 
         int numInterrupts = 0;
         int numRisingEdges = 0;
-        using (GpioController controller = new GpioController(GetTestNumberingScheme(), GetTestDriver()))
+        using (GpioController controller = new GpioController(GetTestDriver()))
         {
             controller.OpenPin(InputPin, PinMode.Input);
             controller.OpenPin(OutputPin, PinMode.Output);
@@ -587,6 +595,33 @@ public abstract class GpioControllerTestBase
         }
     }
 
+    [Fact]
+    public void UsingPinAfterDriverDisposedCausesException()
+    {
+        var controller = new GpioController(GetTestDriver());
+        var pin6 = controller.OpenPin(InputPin, PinMode.Input);
+        controller.Dispose();
+        bool correctExceptionSeen = false;
+        try
+        {
+            pin6.Read();
+        }
+        catch (ObjectDisposedException)
+        {
+            correctExceptionSeen = true;
+        }
+
+        Assert.True(correctExceptionSeen);
+    }
+
+    [Fact]
+    public void UsingControllerAfterDisposeCausesException()
+    {
+        var controller = new GpioController(GetTestDriver());
+        var pin6 = controller.OpenPin(InputPin, PinMode.Input);
+        controller.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => controller.OpenPin(InputPin, PinMode.Input));
+    }
+
     protected abstract GpioDriver GetTestDriver();
-    protected abstract PinNumberingScheme GetTestNumberingScheme();
 }

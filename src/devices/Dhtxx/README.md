@@ -14,10 +14,10 @@ The DHT temperature and humidity sensors are very popular. This projects support
 | Protocol | I2C | 1-Wire | I2C, 1-Wire | 1-Wire | 1-Wire |
 
 * **DHT10** [datasheet (Currently only Chinese)](http://www.aosong.com/userfiles/files/media/DHT10%E8%A7%84%E6%A0%BC%E4%B9%A6.pdf)
-* **DHT11** [datasheet](https://cdn.datasheetspdf.com/pdf-down/D/H/T/DHT11-Aosong.pdf)
-* **DHT12** [datasheet](https://cdn.datasheetspdf.com/pdf-down/D/H/T/DHT12-Aosong.pdf)
-* **DHT21** [datasheet](https://cdn.datasheetspdf.com/pdf-down/A/M/2/AM2301-Aosong.pdf)
-* **DHT22** [datasheet](https://cdn-shop.adafruit.com/datasheets/DHT22.pdf)
+* **DHT11** [datasheet](https://www.mouser.com/datasheet/2/758/DHT11-Technical-Data-Sheet-Translated-Version-1143054.pdf)
+* **DHT12** [datasheet](https://www.sunrom.com/download/592.pdf)
+* **DHT21** [datasheet](https://mikroshop.ch/pdf/DHT21.pdf)
+* **DHT22** [datasheet](https://www.sparkfun.com/datasheets/Sensors/Temperature/DHT22.pdf)
 
 ## Usage
 
@@ -157,7 +157,7 @@ Now if your sensor is an I2C sensor, it should just work perfectly on Windows 10
 
 #### 1-Wire Protocol Circuit
 
-Simply connect your DHTxx data pin to GPIO26 (physical pin 37), the ground to the ground (physical pin 6) and the VCC to +5V (physical pin 2).
+Simply connect your DHTxx data pin to GPIO26 (physical pin 37), the ground to the ground (physical pin 6) and the VCC to +3.3V (physical pin 1). You should probably add a 10k pullup resistor between GPIO26 (physical pin 37) and 3.3v (physical pin 1), to be within the specifications of the sensor, although it will usually work with software-pullups, which this library uses if available.
 
 ![schema](./dht22.png)
 

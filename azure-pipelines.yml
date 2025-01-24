@@ -47,23 +47,12 @@ stages:
       displayName: 'Execute Markdownlint'
       condition: eq(variables['build.reason'], 'PullRequest')
 
+      # Hint: Add /maxCpuCount:1 to disable parellelization in build. Ensures all tests results are printed to the console
     - script: build.cmd -ci
         -configuration $(BuildConfiguration)
         -prepareMachine
         /p:BuildPackages=true
       displayName: Build
-
-    - script: powershell -ExecutionPolicy ByPass -NoProfile eng\common\msbuild.ps1 -warnaserror:0 -ci
-        eng/sendToHelix.proj
-        /t:Test
-        /p:TestOS=Windows_NT
-        /p:Configuration=$(BuildConfiguration)
-        /p:HelixBuild=$(Build.BuildNumber)
-        /bl:$(Build.SourcesDirectory)/artifacts/log/$(BuildConfiguration)/SendToHelix.binlog
-      displayName: Run Helix Tests
-      condition: eq(variables['build.reason'], 'PullRequest')
-      env:
-        SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 
     - task: PublishBuildArtifacts@1
       displayName: Publish Build logs
@@ -79,6 +68,10 @@ stages:
         sourceFolder: $(Build.SourcesDirectory)/artifacts/packages/$(BuildConfiguration)/Shipping
         targetFolder: $(Build.ArtifactStagingDirectory)/Packages
 
+    - task: PublishTestResults@2
+      inputs:
+        mergeTestResults: true
+
     - publish: $(Build.ArtifactStagingDirectory)/Packages
       displayName: Publish Build Artifacts
       artifact: BuildPackages
@@ -88,6 +81,19 @@ stages:
       displayName: Publish Signing Scripts
       artifact: config
       condition: eq(variables['BuildConfiguration'], 'Release')
+
+  - job: Markdown_link_check
+    displayName: Markdown Link Check
+    pool:
+      vmImage: windows-latest
+
+    # Use Version 3.10.3 of markdown-link-check, as 3.11.0 is broken (completely ignores the json file)
+    steps:
+    - powershell: |
+        npm install -g markdown-link-check@3.10.3
+        ls -r *.md | % { markdown-link-check -v -c $(System.DefaultWorkingDirectory)\.markdown-link-check.json $_.FullName; if (-Not $?) { throw "One of the links is wrong" } }
+      displayName: 'Execute markdown-link-check'
+      condition: eq(variables['build.reason'], 'PullRequest')
 
   - job: Linux
     displayName: Linux Build
@@ -115,11 +121,11 @@ stages:
         /p:Configuration=$(_BuildConfig)
         /p:HelixBuild=$(Build.BuildNumber)
         /bl:$(Build.SourcesDirectory)/artifacts/log/$(_BuildConfig)/SendToHelix.binlog
-        /p:HelixAccessToken=$(HelixApiAccessToken)
+#        /p:HelixAccessToken=$(HelixApiAccessToken)
       displayName: Run Helix Tests
       condition: eq(variables['build.reason'], 'PullRequest')
-      env:
-        SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+#      env:
+#        SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 
     - task: PublishBuildArtifacts@1
       displayName: Publish Build logs
@@ -144,7 +150,7 @@ stages:
     steps:
     - script: ./build.sh --ci
         --configuration $(BuildConfiguration)
-        --prepareMachine
+        --prepareMachine /maxCpuCount:1
       displayName: Build
 
     - task: PublishBuildArtifacts@1
@@ -205,7 +211,7 @@ stages:
       runOnce:
         deploy:
           steps:
-          - task: NuGetAuthenticate@0
+          - task: NuGetAuthenticate@1
             displayName: 'NuGet Authenticate'
 
           - task: NuGetCommand@2

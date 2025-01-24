@@ -28,11 +28,14 @@ public class SysFsDriver : UnixDriver
 
     private readonly List<int> _exportedPins = new List<int>();
     private readonly Dictionary<int, UnixDriverDevicePin> _devicePins = new Dictionary<int, UnixDriverDevicePin>();
+    private readonly Dictionary<int, PinValue> _pinValues = new Dictionary<int, PinValue>();
     private TimeSpan _statusUpdateSleepTime = TimeSpan.FromMilliseconds(1);
     private int _pollFileDescriptor = -1;
     private Thread? _eventDetectionThread;
     private int _pinsToDetectEventsCount;
     private CancellationTokenSource? _eventThreadCancellationTokenSource;
+
+    private bool _isDisposed;
 
     private static int ReadOffset()
     {
@@ -71,6 +74,8 @@ public class SysFsDriver : UnixDriver
         {
             throw new PlatformNotSupportedException($"{GetType().Name} is only supported on Linux/Unix.");
         }
+
+        _isDisposed = false;
     }
 
     /// <summary>
@@ -107,6 +112,7 @@ public class SysFsDriver : UnixDriver
     /// <param name="pinNumber">The pin number in the driver's logical numbering scheme.</param>
     protected internal override void OpenPin(int pinNumber)
     {
+        CheckValidDriver();
         int pinOffset = pinNumber + s_pinOffset;
         string pinPath = $"{GpioBasePath}/gpio{pinOffset}";
         // If the directory exists, this becomes a no-op since the pin might have been opened already by the some controller or somebody else.
@@ -118,6 +124,8 @@ public class SysFsDriver : UnixDriver
                 SysFsHelpers.EnsureReadWriteAccessToPath(pinPath);
 
                 _exportedPins.Add(pinNumber);
+                // Default value is low, otherwise it's the set pin mode with default value that will override this
+                _pinValues.Add(pinNumber, PinValue.Low);
             }
             catch (UnauthorizedAccessException e)
             {
@@ -133,6 +141,7 @@ public class SysFsDriver : UnixDriver
     /// <param name="pinNumber">The pin number in the driver's logical numbering scheme.</param>
     protected internal override void ClosePin(int pinNumber)
     {
+        CheckValidDriver();
         int pinOffset = pinNumber + s_pinOffset;
         string pinPath = $"{GpioBasePath}/gpio{pinOffset}";
         // If the directory doesn't exist, this becomes a no-op since the pin was closed already.
@@ -145,6 +154,7 @@ public class SysFsDriver : UnixDriver
                 {
                     _devicePins[pinNumber].Dispose();
                     _devicePins.Remove(pinNumber);
+                    _pinValues.Remove(pinNumber);
                 }
 
                 // If this controller wasn't the one that opened the pin, then Remove will return false, so we don't need to close it.
@@ -167,6 +177,7 @@ public class SysFsDriver : UnixDriver
     /// <param name="mode">The mode to be set.</param>
     protected internal override void SetPinMode(int pinNumber, PinMode mode)
     {
+        CheckValidDriver();
         if (mode == PinMode.InputPullDown || mode == PinMode.InputPullUp)
         {
             throw new PlatformNotSupportedException("This driver is generic so it does not support Input Pull Down or Input Pull Up modes.");
@@ -229,6 +240,7 @@ public class SysFsDriver : UnixDriver
     /// <returns>The value of the pin.</returns>
     protected internal override PinValue Read(int pinNumber)
     {
+        CheckValidDriver();
         PinValue result = default;
         string valuePath = $"{GpioBasePath}/gpio{pinNumber + s_pinOffset}/value";
         if (File.Exists(valuePath))
@@ -248,8 +260,12 @@ public class SysFsDriver : UnixDriver
             throw new InvalidOperationException("There was an attempt to read from a pin that is not open.");
         }
 
+        _pinValues[pinNumber] = result;
         return result;
     }
+
+    /// <inheritdoc/>
+    protected internal override void Toggle(int pinNumber) => Write(pinNumber, !_pinValues[pinNumber]);
 
     private PinValue ConvertSysFsValueToPinValue(string value)
     {
@@ -268,6 +284,7 @@ public class SysFsDriver : UnixDriver
     /// <param name="value">The value to be written to the pin.</param>
     protected internal override void Write(int pinNumber, PinValue value)
     {
+        CheckValidDriver();
         string valuePath = $"{GpioBasePath}/gpio{pinNumber + s_pinOffset}/value";
         if (File.Exists(valuePath))
         {
@@ -275,6 +292,7 @@ public class SysFsDriver : UnixDriver
             {
                 string sysFsValue = ConvertPinValueToSysFs(value);
                 File.WriteAllText(valuePath, sysFsValue);
+                _pinValues[pinNumber] = value;
             }
             catch (UnauthorizedAccessException e)
             {
@@ -298,6 +316,7 @@ public class SysFsDriver : UnixDriver
     /// <returns>The status if the pin supports the mode.</returns>
     protected internal override bool IsPinModeSupported(int pinNumber, PinMode mode)
     {
+        CheckValidDriver();
         // Unix driver does not support pull up or pull down resistors.
         if (mode == PinMode.InputPullDown || mode == PinMode.InputPullUp)
         {
@@ -316,6 +335,7 @@ public class SysFsDriver : UnixDriver
     /// <returns>A structure that contains the result of the waiting operation.</returns>
     protected internal override WaitForEventResult WaitForEvent(int pinNumber, PinEventTypes eventTypes, CancellationToken cancellationToken)
     {
+        CheckValidDriver();
         int pollFileDescriptor = -1;
         int valueFileDescriptor = -1;
         SetPinEventsToDetect(pinNumber, eventTypes);
@@ -447,7 +467,8 @@ public class SysFsDriver : UnixDriver
         }
 
         // Ignore first time because it will always return the current state.
-        while (Interop.epoll_wait(pollFileDescriptor, out _, 1, 0) == -1)
+        using var eventBuffer = new UnmanagedArray<epoll_event>(1);
+        while (Interop.epoll_wait(pollFileDescriptor, eventBuffer, 1, 0) == -1)
         {
             var errorCode = Marshal.GetLastWin32Error();
             if (errorCode != ERROR_CODE_EINTR)
@@ -458,16 +479,16 @@ public class SysFsDriver : UnixDriver
         }
     }
 
-    private unsafe bool WasEventDetected(int pollFileDescriptor, int valueFileDescriptor, out int pinNumber, CancellationToken cancellationToken)
+    private bool WasEventDetected(int pollFileDescriptor, int valueFileDescriptor, out int pinNumber, CancellationToken cancellationToken)
     {
-        char buf;
-        IntPtr bufPtr = new IntPtr(&buf);
         pinNumber = -1;
+
+        using var eventBuffer = new UnmanagedArray<epoll_event>(1);
 
         while (!cancellationToken.IsCancellationRequested)
         {
             // Wait until something happens
-            int waitResult = Interop.epoll_wait(pollFileDescriptor, out epoll_event events, 1, PollingTimeout);
+            int waitResult = Interop.epoll_wait(pollFileDescriptor, eventBuffer, 1, PollingTimeout);
             if (waitResult == -1)
             {
                 var errorCode = Marshal.GetLastWin32Error();
@@ -482,28 +503,8 @@ public class SysFsDriver : UnixDriver
 
             if (waitResult > 0)
             {
-                pinNumber = events.data.pinNumber;
-
-                // This entire section is probably not necessary, but this seems to be hard to validate.
-                // See https://github.com/dotnet/iot/pull/914#discussion_r389924106 and issue #1024.
-                if (valueFileDescriptor == -1)
-                {
-                    // valueFileDescriptor will be -1 when using the callback eventing. For WaitForEvent, the value will be set.
-                    valueFileDescriptor = _devicePins[pinNumber].FileDescriptor;
-                }
-
-                int lseekResult = Interop.lseek(valueFileDescriptor, 0, SeekFlags.SEEK_SET);
-                if (lseekResult == -1)
-                {
-                    throw new IOException("Error while trying to seek in value file.");
-                }
-
-                int readResult = Interop.read(valueFileDescriptor, bufPtr, 1);
-                if (readResult != 1)
-                {
-                    throw new IOException("Error while trying to read value file.");
-                }
-
+                var @event = eventBuffer.ReadToManagedArray()[0];
+                pinNumber = @event.data.pinNumber;
                 return true;
             }
         }
@@ -588,6 +589,7 @@ public class SysFsDriver : UnixDriver
         }
 
         _devicePins.Clear();
+        _pinValues.Clear();
         if (_pollFileDescriptor != -1)
         {
             Interop.close(_pollFileDescriptor);
@@ -599,7 +601,16 @@ public class SysFsDriver : UnixDriver
             ClosePin(_exportedPins.FirstOrDefault());
         }
 
+        _isDisposed = true;
         base.Dispose(disposing);
+    }
+
+    private void CheckValidDriver()
+    {
+        if (_isDisposed)
+        {
+            throw new ObjectDisposedException(nameof(SysFsDriver));
+        }
     }
 
     /// <summary>
@@ -610,6 +621,7 @@ public class SysFsDriver : UnixDriver
     /// <param name="callback">Delegate that defines the structure for callbacks when a pin value changed event occurs.</param>
     protected internal override void AddCallbackForPinValueChangedEvent(int pinNumber, PinEventTypes eventTypes, PinChangeEventHandler callback)
     {
+        CheckValidDriver();
         if (!_devicePins.ContainsKey(pinNumber))
         {
             _devicePins.Add(pinNumber, new UnixDriverDevicePin(Read(pinNumber)));
@@ -731,6 +743,7 @@ public class SysFsDriver : UnixDriver
     /// <param name="callback">Delegate that defines the structure for callbacks when a pin value changed event occurs.</param>
     protected internal override void RemoveCallbackForPinValueChangedEvent(int pinNumber, PinChangeEventHandler callback)
     {
+        CheckValidDriver();
         if (!_devicePins.ContainsKey(pinNumber))
         {
             throw new InvalidOperationException("Attempted to remove a callback for a pin that is not listening for events.");
@@ -756,6 +769,7 @@ public class SysFsDriver : UnixDriver
     /// <returns>The mode of the pin.</returns>
     protected internal override PinMode GetPinMode(int pinNumber)
     {
+        CheckValidDriver();
         pinNumber += s_pinOffset;
         string directionPath = $"{GpioBasePath}/gpio{pinNumber}/direction";
         if (File.Exists(directionPath))

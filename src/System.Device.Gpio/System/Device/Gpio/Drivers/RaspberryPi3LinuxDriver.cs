@@ -2,10 +2,12 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Buffers.Binary;
+using System.Device.Gpio.Drivers.Libgpiod.V1;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -34,6 +36,8 @@ internal unsafe class RaspberryPi3LinuxDriver : GpioDriver
     private RegisterView* _registerViewPointer = null;
 
     private UnixDriver? _interruptDriver = null;
+
+    private string? _detectedModel;
 
     public RaspberryPi3LinuxDriver()
     {
@@ -173,6 +177,13 @@ internal unsafe class RaspberryPi3LinuxDriver : GpioDriver
 
         uint register = _registerViewPointer->GPLEV[pinNumber / 32];
         return Convert.ToBoolean((register >> (pinNumber % 32)) & 1) ? PinValue.High : PinValue.Low;
+    }
+
+    /// <inheritdoc/>
+    protected internal override void Toggle(int pinNumber)
+    {
+        ValidatePinNumber(pinNumber);
+        _interruptDriver!.Toggle(pinNumber);
     }
 
     /// <summary>
@@ -617,7 +628,7 @@ internal unsafe class RaspberryPi3LinuxDriver : GpioDriver
     {
         try
         {
-            _interruptDriver = new LibGpiodDriver(0);
+            _interruptDriver = new LibGpiodV1Driver(0);
         }
         catch (PlatformNotSupportedException)
         {
@@ -711,11 +722,13 @@ internal unsafe class RaspberryPi3LinuxDriver : GpioDriver
             {
                 if (File.Exists(ModelFilePath))
                 {
-                    string model = File.ReadAllText(ModelFilePath, Text.Encoding.ASCII);
-                    if (model.Contains("Raspberry Pi 4"))
+                    string model = File.ReadAllText(ModelFilePath, Encoding.ASCII);
+                    if (model.Contains("Raspberry Pi 4") || model.Contains("Raspberry Pi Compute Module 4"))
                     {
                         IsPi4 = true;
                     }
+
+                    _detectedModel = model;
                 }
             }
             catch (Exception x)
@@ -758,6 +771,37 @@ internal unsafe class RaspberryPi3LinuxDriver : GpioDriver
 
         _interruptDriver?.Dispose();
         _interruptDriver = null;
+    }
+
+    /// <inheritdoc />
+    public override ComponentInformation QueryComponentInformation()
+    {
+        StringBuilder sb = new StringBuilder();
+        Initialize();
+        if (_detectedModel != null)
+        {
+            sb.Append(_detectedModel);
+        }
+        else
+        {
+            sb.Append($"Raspberry Pi {(IsPi4 ? "4" : "3")}");
+        }
+
+        sb.Append($" linux driver with {PinCount} pins");
+        if (_interruptDriver != null)
+        {
+            sb.Append(" and an interrupt driver");
+        }
+
+        ComponentInformation ci = new ComponentInformation(this, sb.ToString());
+        ci.Properties["Model"] = _detectedModel ?? string.Empty;
+
+        if (_interruptDriver != null)
+        {
+            ci.AddSubComponent(_interruptDriver.QueryComponentInformation());
+        }
+
+        return ci;
     }
 
     private class PinState

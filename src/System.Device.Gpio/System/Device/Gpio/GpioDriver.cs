@@ -13,6 +13,14 @@ namespace System.Device.Gpio;
 public abstract class GpioDriver : IDisposable
 {
     /// <summary>
+    /// Finalizer to clean up unmanaged resources
+    /// </summary>
+    ~GpioDriver()
+    {
+        Dispose(false);
+    }
+
+    /// <summary>
     /// The number of pins provided by the driver.
     /// </summary>
     protected internal abstract int PinCount { get; }
@@ -83,6 +91,12 @@ public abstract class GpioDriver : IDisposable
     protected internal abstract PinValue Read(int pinNumber);
 
     /// <summary>
+    /// Toggle the current value of a pin.
+    /// </summary>
+    /// <param name="pinNumber">The pin number in the driver's logical numbering scheme.</param>
+    protected internal virtual void Toggle(int pinNumber) => Write(pinNumber, !Read(pinNumber));
+
+    /// <summary>
     /// Writes a value to a pin.
     /// </summary>
     /// <param name="pinNumber">The pin number in the driver's logical numbering scheme.</param>
@@ -141,5 +155,19 @@ public abstract class GpioDriver : IDisposable
     protected virtual void Dispose(bool disposing)
     {
         // Nothing to do in base class.
+    }
+
+    /// <summary>
+    /// Query information about a component and its children.
+    /// </summary>
+    /// <returns>A tree of <see cref="ComponentInformation"/> instances.</returns>
+    /// <remarks>
+    /// The returned data structure (or rather, its string representation) can be used to diagnose problems with incorrect driver types or
+    /// other system configuration problems.
+    /// This method is currently reserved for debugging purposes. Its behavior its and signature are subject to change.
+    /// </remarks>
+    public virtual ComponentInformation QueryComponentInformation()
+    {
+        return new ComponentInformation(this, "Gpio Driver");
     }
 }

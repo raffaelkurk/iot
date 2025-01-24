@@ -2,7 +2,9 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Device.Gpio.Drivers;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32;
@@ -22,6 +24,7 @@ public class GpioController : IDisposable
     private const string BaseBoardProductRegistryValue = @"SYSTEM\HardwareConfig\Current\BaseBoardProduct";
     private const string RaspberryPi2Product = "Raspberry Pi 2";
     private const string RaspberryPi3Product = "Raspberry Pi 3";
+    private const string RaspberryPi5Product = "Raspberry Pi 5";
 
     private const string HummingBoardProduct = "HummingBoard-Edge";
     private const string HummingBoardHardware = @"Freescale i.MX6 Quad/DualLite (Device Tree)";
@@ -30,14 +33,33 @@ public class GpioController : IDisposable
     /// If a pin element exists, that pin is open. Uses current controller's numbering scheme
     /// </summary>
     private readonly ConcurrentDictionary<int, PinValue?> _openPins;
+    private readonly ConcurrentDictionary<int, GpioPin> _gpioPins;
     private GpioDriver _driver;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="GpioController"/> class that will use the logical pin numbering scheme as default.
     /// </summary>
     public GpioController()
+#pragma warning disable CS0612 // PinNumberingScheme is obsolete
         : this(PinNumberingScheme.Logical)
+#pragma warning restore CS0612
     {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="GpioController"/> class that will use the specified numbering scheme and driver.
+    /// </summary>
+    /// <param name="driver">The driver that manages all of the pin operations for the controller.</param>
+    public GpioController(GpioDriver driver)
+    {
+        _driver = driver;
+
+#pragma warning disable CS0612 // PinNumberingScheme is obsolete
+        NumberingScheme = PinNumberingScheme.Logical;
+#pragma warning restore CS0612
+
+        _openPins = new ConcurrentDictionary<int, PinValue?>();
+        _gpioPins = new ConcurrentDictionary<int, GpioPin>();
     }
 
     /// <summary>
@@ -45,11 +67,13 @@ public class GpioController : IDisposable
     /// </summary>
     /// <param name="numberingScheme">The numbering scheme used to represent pins provided by the controller.</param>
     /// <param name="driver">The driver that manages all of the pin operations for the controller.</param>
+    [Obsolete]
     public GpioController(PinNumberingScheme numberingScheme, GpioDriver driver)
     {
         _driver = driver;
         NumberingScheme = numberingScheme;
         _openPins = new ConcurrentDictionary<int, PinValue?>();
+        _gpioPins = new ConcurrentDictionary<int, GpioPin>();
     }
 
     /// <summary>
@@ -57,6 +81,7 @@ public class GpioController : IDisposable
     /// The controller will default to use the driver that best applies given the platform the program is executing on.
     /// </summary>
     /// <param name="numberingScheme">The numbering scheme used to represent pins provided by the controller.</param>
+    [Obsolete]
     public GpioController(PinNumberingScheme numberingScheme)
         : this(numberingScheme, GetBestDriverForBoard())
     {
@@ -65,12 +90,31 @@ public class GpioController : IDisposable
     /// <summary>
     /// The numbering scheme used to represent pins provided by the controller.
     /// </summary>
+    [Obsolete]
     public PinNumberingScheme NumberingScheme { get; }
 
     /// <summary>
     /// The number of pins provided by the controller.
     /// </summary>
-    public virtual int PinCount => _driver.PinCount;
+    public virtual int PinCount
+    {
+        get
+        {
+            CheckDriverValid();
+            return _driver.PinCount;
+        }
+    }
+
+    /// <summary>
+    /// Returns the collection of open pins
+    /// </summary>
+    private IEnumerable<GpioPin> OpenPins
+    {
+        get
+        {
+            return _gpioPins.Values;
+        }
+    }
 
     /// <summary>
     /// Gets the logical pin number in the controller's numbering scheme.
@@ -79,7 +123,9 @@ public class GpioController : IDisposable
     /// <returns>The logical pin number in the controller's numbering scheme.</returns>
     protected virtual int GetLogicalPinNumber(int pinNumber)
     {
+#pragma warning disable CS0612 // PinNumberingScheme is obsolete
         return (NumberingScheme == PinNumberingScheme.Logical) ? pinNumber : _driver.ConvertPinNumberToLogicalNumberingScheme(pinNumber);
+#pragma warning restore CS0612
     }
 
     /// <summary>
@@ -87,15 +133,17 @@ public class GpioController : IDisposable
     /// The driver attempts to open the pin without changing its mode or value.
     /// </summary>
     /// <param name="pinNumber">The pin number in the controller's numbering scheme.</param>
-    public void OpenPin(int pinNumber)
+    public GpioPin OpenPin(int pinNumber)
     {
         if (IsPinOpen(pinNumber))
         {
-            throw new InvalidOperationException($"Pin {pinNumber} is already open.");
+            return _gpioPins[pinNumber];
         }
 
         OpenPinCore(pinNumber);
         _openPins.TryAdd(pinNumber, null);
+        _gpioPins[pinNumber] = new GpioPin(pinNumber, this);
+        return _gpioPins[pinNumber];
     }
 
     /// <summary>
@@ -113,10 +161,11 @@ public class GpioController : IDisposable
     /// </summary>
     /// <param name="pinNumber">The pin number in the controller's numbering scheme.</param>
     /// <param name="mode">The mode to be set.</param>
-    public void OpenPin(int pinNumber, PinMode mode)
+    public GpioPin OpenPin(int pinNumber, PinMode mode)
     {
-        OpenPin(pinNumber);
+        var pin = OpenPin(pinNumber);
         SetPinMode(pinNumber, mode);
+        return pin;
     }
 
     /// <summary>
@@ -126,13 +175,14 @@ public class GpioController : IDisposable
     /// <param name="mode">The mode to be set.</param>
     /// <param name="initialValue">The initial value to be set if the mode is output. The driver will attempt to set the mode without causing glitches to the other value.
     /// (if <paramref name="initialValue"/> is <see cref="PinValue.High"/>, the pin should not glitch to low during open)</param>
-    public void OpenPin(int pinNumber, PinMode mode, PinValue initialValue)
+    public GpioPin OpenPin(int pinNumber, PinMode mode, PinValue initialValue)
     {
-        OpenPin(pinNumber);
+        var pin = OpenPin(pinNumber);
         // Set the desired initial value
         _openPins[pinNumber] = initialValue;
 
         SetPinMode(pinNumber, mode);
+        return pin;
     }
 
     /// <summary>
@@ -159,6 +209,7 @@ public class GpioController : IDisposable
     {
         int logicalPinNumber = GetLogicalPinNumber(pinNumber);
         _driver.ClosePin(logicalPinNumber);
+        _gpioPins.TryRemove(pinNumber, out _);
     }
 
     /// <summary>
@@ -210,9 +261,18 @@ public class GpioController : IDisposable
     /// </summary>
     /// <param name="pinNumber">The pin number in the controller's numbering scheme.</param>
     /// <returns>The status if the pin is open or closed.</returns>
-    public bool IsPinOpen(int pinNumber)
+    public virtual bool IsPinOpen(int pinNumber)
     {
+        CheckDriverValid();
         return _openPins.ContainsKey(pinNumber);
+    }
+
+    private void CheckDriverValid()
+    {
+        if (_driver == null)
+        {
+            throw new ObjectDisposedException(nameof(GpioController));
+        }
     }
 
     /// <summary>
@@ -223,6 +283,7 @@ public class GpioController : IDisposable
     /// <returns>The status if the pin supports the mode.</returns>
     public virtual bool IsPinModeSupported(int pinNumber, PinMode mode)
     {
+        CheckDriverValid();
         int logicalPinNumber = GetLogicalPinNumber(pinNumber);
         return _driver.IsPinModeSupported(logicalPinNumber, mode);
     }
@@ -241,6 +302,20 @@ public class GpioController : IDisposable
 
         int logicalPinNumber = GetLogicalPinNumber(pinNumber);
         return _driver.Read(logicalPinNumber);
+    }
+
+    /// <summary>
+    /// Toggle the current value of a pin.
+    /// </summary>
+    /// <param name="pinNumber">The pin number in the controller's numbering scheme.</param>
+    public virtual void Toggle(int pinNumber)
+    {
+        if (!IsPinOpen(pinNumber))
+        {
+            throw new InvalidOperationException($"Can not read from pin {pinNumber} because it is not open.");
+        }
+
+        _driver.Toggle(pinNumber);
     }
 
     /// <summary>
@@ -375,6 +450,7 @@ public class GpioController : IDisposable
         }
 
         _openPins.Clear();
+        _gpioPins.Clear();
         _driver?.Dispose();
         _driver = null!;
     }
@@ -433,14 +509,40 @@ public class GpioController : IDisposable
     /// <returns>A driver that works with the board the program is executing on.</returns>
     private static GpioDriver GetBestDriverForBoardOnLinux()
     {
-        RaspberryPi3LinuxDriver? internalDriver = RaspberryPi3Driver.CreateInternalRaspberryPi3LinuxDriver(out _);
+        var boardInfo = RaspberryBoardInfo.LoadBoardInfo();
 
-        if (internalDriver is object)
+        switch (boardInfo.BoardModel)
         {
-            return new RaspberryPi3Driver(internalDriver);
-        }
+            case RaspberryBoardInfo.Model.RaspberryPi3B:
+            case RaspberryBoardInfo.Model.RaspberryPi3APlus:
+            case RaspberryBoardInfo.Model.RaspberryPi3BPlus:
+            case RaspberryBoardInfo.Model.RaspberryPiZeroW:
+            case RaspberryBoardInfo.Model.RaspberryPiZero2W:
+            case RaspberryBoardInfo.Model.RaspberryPi4:
+            case RaspberryBoardInfo.Model.RaspberryPi400:
+            case RaspberryBoardInfo.Model.RaspberryPiComputeModule4:
+            case RaspberryBoardInfo.Model.RaspberryPiComputeModule3:
 
-        return UnixDriver.Create();
+                RaspberryPi3LinuxDriver? internalDriver = RaspberryPi3Driver.CreateInternalRaspberryPi3LinuxDriver(out _);
+
+                if (internalDriver is object)
+                {
+                    return new RaspberryPi3Driver(internalDriver);
+                }
+
+                return UnixDriver.Create();
+
+            case RaspberryBoardInfo.Model.RaspberryPi5:
+
+                // For now, for Raspberry Pi 5, we'll use the LibGpiodDriver.
+                // We need to create a new driver for the Raspberry Pi 5,
+                // because the Raspberry Pi 5 uses an entirely different GPIO controller (RP1)
+                return new LibGpiodDriver(4);
+
+            default:
+
+                return UnixDriver.Create();
+        }
     }
 
     /// <summary>
@@ -477,5 +579,30 @@ public class GpioController : IDisposable
 
         // Default for Windows IoT Core on a non-specific device
         return new Windows10Driver();
+    }
+
+    /// <summary>
+    /// Query information about a component and its children.
+    /// </summary>
+    /// <returns>A tree of <see cref="ComponentInformation"/> instances.</returns>
+    /// <remarks>
+    /// The returned data structure (or rather, its string representation) can be used to diagnose problems with incorrect driver types or
+    /// other system configuration problems.
+    /// This method is currently reserved for debugging purposes. Its behavior its and signature are subject to change.
+    /// </remarks>
+    public virtual ComponentInformation QueryComponentInformation()
+    {
+        ComponentInformation self = new ComponentInformation(this, "Generic GPIO Controller");
+
+        if (_driver != null)
+        {
+            ComponentInformation driverInfo = _driver.QueryComponentInformation();
+            self.AddSubComponent(driverInfo);
+        }
+
+        // PinCount is not added on purpose, because the property throws NotSupportedException on some hardware
+        self.Properties["OpenPins"] = string.Join(", ", _openPins.Select(x => x.Key));
+
+        return self;
     }
 }

@@ -30,13 +30,11 @@ namespace Iot.Device.Arduino
         private const byte FIRMATA_PROTOCOL_MAJOR_VERSION = 2;
         private const byte FIRMATA_PROTOCOL_MINOR_VERSION = 5; // 2.5 works, but 2.6 is recommended
         private const int FIRMATA_INIT_TIMEOUT_SECONDS = 2;
-        internal static readonly TimeSpan DefaultReplyTimeout = TimeSpan.FromMilliseconds(1000);
+        internal static readonly TimeSpan DefaultReplyTimeout = TimeSpan.FromMilliseconds(3000);
 
         private byte _firmwareVersionMajor;
         private byte _firmwareVersionMinor;
-        private byte _actualFirmataProtocolMajorVersion;
-        private byte _actualFirmataProtocolMinorVersion;
-
+        private Version _actualFirmataProtocolVersion;
         private Version _firmwareVersion;
 
         private int _lastRequestId;
@@ -75,11 +73,16 @@ namespace Iot.Device.Arduino
 
         private long _bytesTransmitted = 0;
 
+        private int _numberOfConsecutiveI2cWrites = 0;
+
+        private bool _systemVariablesSupported = false;
+
         public FirmataDevice(List<SupportedMode> supportedModes)
         {
             _firmwareVersionMajor = 0;
             _firmwareVersionMinor = 0;
             _firmwareVersion = new Version(0, 0);
+            _actualFirmataProtocolVersion = new Version(0, 0);
             _firmataStream = null;
             InputThreadShouldExit = false;
             _dataReceived = new AutoResetEvent(false);
@@ -253,7 +256,7 @@ namespace Iot.Device.Arduino
                 if (data == 0xFFFF)
                 {
                     // get elapsed seconds, given as a double with resolution in nanoseconds
-                    var elapsed = timeout_start.Elapsed;
+                    TimeSpan elapsed = timeout_start.Elapsed;
 
                     if (elapsed > DefaultReplyTimeout)
                     {
@@ -289,7 +292,7 @@ namespace Iot.Device.Arduino
                 case FirmataCommand.SYSTEM_RESET:
                     return;
                 case FirmataCommand.PROTOCOL_VERSION:
-                    if (_actualFirmataProtocolMajorVersion != 0)
+                    if (_actualFirmataProtocolVersion.Major != 0)
                     {
                         // Firmata sends this message automatically after a device reset (if you press the reset button on the arduino)
                         // If we know the version already, this is unexpected.
@@ -297,26 +300,25 @@ namespace Iot.Device.Arduino
                         OnError?.Invoke("The device was unexpectedly reset. Please restart the communication.", null);
                     }
 
-                    _actualFirmataProtocolMajorVersion = message[0];
-                    _actualFirmataProtocolMinorVersion = message[1];
-                    _logger.LogInformation($"Received protocol version: {_actualFirmataProtocolMajorVersion}.{_actualFirmataProtocolMinorVersion}.");
+                    _actualFirmataProtocolVersion = new Version(message[0], message[1]);
+                    _logger.LogInformation($"Received protocol version: {_actualFirmataProtocolVersion}.");
                     _dataReceived.Set();
 
                     return;
 
                 case FirmataCommand.ANALOG_MESSAGE:
                     // report analog commands store the pin number in the lower nibble of the command byte, the value is split over two 7-bit bytes
-                    // AnalogValueUpdated(this,
-                    //    new CallbackEventArgs(lower_nibble, (ushort)(message[0] | (message[1] << 7))));
                     {
-                        int pin = lower_nibble;
+                        int channel = lower_nibble;
                         uint value = (uint)(message[0] | (message[1] << 7));
+                        // This must work
+                        int pin = _supportedPinConfigurations.First(x => x.AnalogPinNumber == channel).Pin;
                         lock (_lastAnalogValueLock)
                         {
                             _lastAnalogValues[pin] = value;
                         }
 
-                        AnalogPinValueUpdated?.Invoke(pin, value);
+                        AnalogPinValueUpdated?.Invoke(channel, value);
                     }
 
                     break;
@@ -362,7 +364,7 @@ namespace Iot.Device.Arduino
                     }
 
                     // retrieve the raw data array & extract the extended-command byte
-                    var raw_data = message.ToArray();
+                    byte[] raw_data = message.ToArray();
                     FirmataSysexCommand sysCommand = (FirmataSysexCommand)(raw_data[0]);
                     int index = 0;
                     ++index;
@@ -415,7 +417,7 @@ namespace Iot.Device.Arduino
                             {
                                 _supportedPinConfigurations.Clear();
                                 int idx = 1;
-                                var currentPin = new SupportedPinConfiguration(0);
+                                SupportedPinConfiguration currentPin = new SupportedPinConfiguration(0);
                                 int pin = 0;
                                 while (idx < raw_data.Length)
                                 {
@@ -483,6 +485,24 @@ namespace Iot.Device.Arduino
                             }
 
                             break;
+
+                        case FirmataSysexCommand.EXTENDED_ANALOG:
+                            // report analog commands store the pin number in the lower nibble of the command byte, the value is split over two 7-bit bytes
+                            {
+                                int channel = raw_data[1];
+                                uint value = (uint)(raw_data[2] | (raw_data[3] << 7));
+                                // This must work
+                                int pin = _supportedPinConfigurations.First(x => x.AnalogPinNumber == channel).Pin;
+                                lock (_lastAnalogValueLock)
+                                {
+                                    _lastAnalogValues[pin] = value;
+                                }
+
+                                AnalogPinValueUpdated?.Invoke(channel, value);
+                            }
+
+                            break;
+
                         case FirmataSysexCommand.I2C_REPLY:
                             _lastCommandError = CommandError.None;
                             _pendingResponses.Add(raw_data);
@@ -568,7 +588,7 @@ namespace Iot.Device.Arduino
         }
 
         /// <summary>
-        /// Send a command and wait for a reply
+        /// Send a set of command and wait for a reply
         /// </summary>
         /// <param name="sequences">The command sequences to send, typically starting with <see cref="FirmataCommand.START_SYSEX"/> and ending with <see cref="FirmataCommand.END_SYSEX"/></param>
         /// <param name="timeout">A non-default timeout</param>
@@ -604,7 +624,7 @@ namespace Iot.Device.Arduino
             }
 
             Dictionary<FirmataCommandSequence, bool> sequencesWithAck = new();
-            foreach (var s in sequences)
+            foreach (FirmataCommandSequence s in sequences)
             {
                 sequencesWithAck.Add(s, false);
                 _firmataStream.Write(s.InternalSequence, 0, s.Length);
@@ -615,9 +635,9 @@ namespace Iot.Device.Arduino
             byte[]? response;
             do
             {
-                foreach (var s2 in sequencesWithAck)
+                foreach (KeyValuePair<FirmataCommandSequence, bool> s2 in sequencesWithAck)
                 {
-                    if (_pendingResponses.TryRemoveElement(x => isMatchingAck(s2.Key, x!), timeout, out response))
+                    if (s2.Value == false && _pendingResponses.TryRemoveElement(x => isMatchingAck(s2.Key, x!), timeout, out response))
                     {
                         CommandError e = CommandError.None;
                         if (response == null)
@@ -777,7 +797,7 @@ namespace Iot.Device.Arduino
                         continue;
                     }
 
-                    if (_actualFirmataProtocolMajorVersion == 0)
+                    if (_actualFirmataProtocolVersion.Major == 0)
                     {
                         // The device may be resetting itself as part of opening the serial port (this is the typical
                         // behavior of the Arduino Uno, but not of most newer boards)
@@ -785,7 +805,7 @@ namespace Iot.Device.Arduino
                         continue;
                     }
 
-                    return new Version(_actualFirmataProtocolMajorVersion, _actualFirmataProtocolMinorVersion);
+                    return _actualFirmataProtocolVersion;
                 }
             }
 
@@ -884,6 +904,7 @@ namespace Iot.Device.Arduino
                 {
                     lastException = x;
                     OnError?.Invoke("Timeout waiting for answer. Retries possible.", x);
+                    Thread.Sleep(20);
                 }
             }
 
@@ -918,7 +939,7 @@ namespace Iot.Device.Arduino
 
             return PerformRetries(3, () =>
             {
-                var response = SendCommandAndWait(getPinModeSequence, DefaultReplyTimeout, (sequence, bytes) =>
+                byte[] response = SendCommandAndWait(getPinModeSequence, DefaultReplyTimeout, (sequence, bytes) =>
                 {
                     return bytes.Length >= 4 && bytes[1] == pinNumber;
                 }, out _);
@@ -998,7 +1019,7 @@ namespace Iot.Device.Arduino
             // See documentation at https://github.com/firmata/protocol/blob/master/i2c.md
             FirmataCommandSequence i2cSequence = new FirmataCommandSequence();
             bool doWait = false;
-            if (writeData != null && writeData.Length > 0)
+            if (writeData.Length > 0)
             {
                 i2cSequence.WriteByte((byte)FirmataSysexCommand.I2C_REQUEST);
                 i2cSequence.WriteByte((byte)slaveAddress);
@@ -1010,7 +1031,7 @@ namespace Iot.Device.Arduino
 
             int sequenceNo = (_i2cSequence++) & 0b111;
 
-            if (replyData != null && replyData.Length > 0)
+            if (replyData.Length > 0)
             {
                 doWait = true;
                 if (i2cSequence.Length > 1)
@@ -1034,7 +1055,7 @@ namespace Iot.Device.Arduino
 
             if (doWait)
             {
-                var response = SendCommandAndWait(i2cSequence, TimeSpan.FromSeconds(3), (sequence, bytes) =>
+                byte[] response = SendCommandAndWait(i2cSequence, TimeSpan.FromSeconds(10), (sequence, bytes) =>
                 {
                     if (bytes.Length < 5)
                     {
@@ -1074,23 +1095,53 @@ namespace Iot.Device.Arduino
                 {
                     throw new IOException($"Expected {replyData.Length} bytes, got only {bytesReceived}");
                 }
+
+                _numberOfConsecutiveI2cWrites = 0; // after we get a reply, we can free-fire a few times again
             }
             else
             {
                 SendCommand(i2cSequence);
+                // If we use a series of write-only I2C commands we have to occasionally introduce a command that requires an answer, or we flood the device's input buffer,
+                // causing network retries, which under the line causes more delays than this. This problem is particularly obvious with an ESP32 in Wifi mode
+                _numberOfConsecutiveI2cWrites++;
+                if (_numberOfConsecutiveI2cWrites % 4 == 0)
+                {
+                    var pin = _supportedPinConfigurations.FirstOrDefault(x => x.PinModes.Contains(SupportedMode.I2c));
+                    if (pin != null)
+                    {
+                        GetPinMode(pin.Pin);
+                    }
+                    else
+                    {
+                        Thread.Sleep(10); // Hopefully, this doesn't happen
+                    }
+                }
             }
         }
 
         public void SetPwmChannel(int pin, double dutyCycle)
         {
-            FirmataCommandSequence pwmCommandSequence = new();
-            pwmCommandSequence.WriteByte((byte)FirmataSysexCommand.EXTENDED_ANALOG);
-            pwmCommandSequence.WriteByte((byte)pin);
             // The arduino expects values between 0 and 255 for PWM channels.
-            // The frequency cannot be set.
+            // The frequency cannot currently be set using the protocol
             int pwmMaxValue = _supportedPinConfigurations[pin].PwmResolutionBits; // This is 8 for most arduino boards
             pwmMaxValue = (1 << pwmMaxValue) - 1;
             int value = (int)Math.Max(0, Math.Min(dutyCycle * pwmMaxValue, pwmMaxValue));
+
+            // At most 14 bits used?
+            if (((pwmMaxValue & 0x3FFF) == pwmMaxValue) && (pin <= 15))
+            {
+                // Use shorthand
+                FirmataCommandSequence analogMessage = new FirmataCommandSequence(FirmataCommand.ANALOG_MESSAGE, pin);
+                analogMessage.WriteByte((byte)(value & (uint)sbyte.MaxValue)); // lower 7 bits
+                analogMessage.WriteByte((byte)(value >> 7 & sbyte.MaxValue)); // top bit (rest unused)
+                // No(!) END_SYSEX here
+                SendCommand(analogMessage);
+                return;
+            }
+
+            FirmataCommandSequence pwmCommandSequence = new();
+            pwmCommandSequence.WriteByte((byte)FirmataSysexCommand.EXTENDED_ANALOG);
+            pwmCommandSequence.WriteByte((byte)pin);
             pwmCommandSequence.WriteByte((byte)(value & (uint)sbyte.MaxValue)); // lower 7 bits
             pwmCommandSequence.WriteByte((byte)(value >> 7 & sbyte.MaxValue)); // top bit (rest unused)
             pwmCommandSequence.WriteByte((byte)FirmataCommand.END_SYSEX);
@@ -1098,9 +1149,11 @@ namespace Iot.Device.Arduino
         }
 
         /// <summary>
-        /// This takes the pin number in Arduino's own Analog numbering scheme. So A0 shall be specifed as 0
+        /// Enable analog reporting for the given physical pin
         /// </summary>
-        internal void EnableAnalogReporting(int pinNumber)
+        /// <param name="pinNumber">Physical pin number</param>
+        /// <param name="analogChannel">Analog channel corresponding to the given pin (Axx in arduino terminology)</param>
+        internal void EnableAnalogReporting(int pinNumber, int analogChannel)
         {
             if (_firmataStream == null)
             {
@@ -1110,12 +1163,30 @@ namespace Iot.Device.Arduino
             lock (_synchronisationLock)
             {
                 _lastAnalogValues[pinNumber] = 0; // to make sure this entry exists
-                _firmataStream.WriteByte((byte)((int)FirmataCommand.REPORT_ANALOG_PIN + pinNumber));
-                _firmataStream.WriteByte((byte)1);
+                _logger.LogInformation($"Enabling analog reporting on pin {pinNumber}, Channel A{analogChannel}");
+                if (analogChannel <= 15)
+                {
+                    _firmataStream.WriteByte((byte)((int)FirmataCommand.REPORT_ANALOG_PIN + analogChannel));
+                    _firmataStream.WriteByte((byte)1);
+                }
+                else if (_actualFirmataProtocolVersion >= new Version(2, 7))
+                {
+                    // Note: Requires Protocol Version 2.7 or later
+                    FirmataCommandSequence commandSequence = new();
+                    commandSequence.WriteByte((byte)FirmataSysexCommand.EXTENDED_REPORT_ANALOG);
+                    commandSequence.WriteByte((byte)analogChannel);
+                    commandSequence.WriteByte((byte)1);
+                    commandSequence.WriteByte((byte)FirmataCommand.END_SYSEX);
+                    SendCommand(commandSequence);
+                }
+                else
+                {
+                    throw new NotSupportedException($"Using analog channel A{analogChannel} requires firmata protocol version 2.7 or later");
+                }
             }
         }
 
-        internal void DisableAnalogReporting(int pinNumber)
+        internal void DisableAnalogReporting(int pinNumber, int analogChannel)
         {
             if (_firmataStream == null)
             {
@@ -1124,9 +1195,183 @@ namespace Iot.Device.Arduino
 
             lock (_synchronisationLock)
             {
-                _firmataStream.WriteByte((byte)((int)FirmataCommand.REPORT_ANALOG_PIN + pinNumber));
-                _firmataStream.WriteByte((byte)0);
+                _logger.LogInformation($"Disabling analog reporting on pin {pinNumber}, Channel A{analogChannel}");
+                if (analogChannel <= 15)
+                {
+                    _firmataStream.WriteByte((byte)((int)FirmataCommand.REPORT_ANALOG_PIN + analogChannel));
+                    _firmataStream.WriteByte((byte)0);
+                }
+                else
+                {
+                    FirmataCommandSequence pwmCommandSequence = new();
+                    pwmCommandSequence.WriteByte((byte)FirmataSysexCommand.EXTENDED_REPORT_ANALOG);
+                    pwmCommandSequence.WriteByte((byte)analogChannel);
+                    pwmCommandSequence.WriteByte((byte)0);
+                    pwmCommandSequence.WriteByte((byte)FirmataCommand.END_SYSEX);
+                    SendCommand(pwmCommandSequence);
+        }
             }
+        }
+
+        /// <summary>
+        /// Check support for System variables. Should be done on init/reinit.
+        /// </summary>
+        /// <returns>Null if everything is ok, an error message otherwise.</returns>
+        internal string? CheckSystemVariablesSupported()
+        {
+            if (_actualFirmataProtocolVersion.Major == 0)
+            {
+                // This should not happen
+                _systemVariablesSupported = false;
+                return "Cannot query System Variables before the firmata version is known";
+            }
+
+            if (_actualFirmataProtocolVersion < new Version(2, 7))
+            {
+                _systemVariablesSupported = false;
+                return "Firmata protocol version 2.7 or above required";
+            }
+
+            int value = 0;
+            try
+            {
+                // now assume true (otherwise, the method would also fail immediately)
+                _systemVariablesSupported = true;
+                if (!GetOrSetSystemVariable(SystemVariable.FunctionSupportCheck, -1, true, ref value))
+                {
+                    _systemVariablesSupported = false;
+                    return "System Variable support check failed";
+                }
+            }
+            catch (Exception x) when (x is TimeoutException || x is IOException || x is NotSupportedException)
+            {
+                _systemVariablesSupported = false;
+                return $"GetSystemVariable(FunctionSupportCheck) returned an exception: {x.Message}";
+            }
+
+            if (value != 1)
+            {
+                _systemVariablesSupported = false;
+                return "System variables not supported";
+            }
+
+            _systemVariablesSupported = true;
+
+            return null;
+        }
+
+        public bool GetOrSetSystemVariable(SystemVariable variableId, int pinNumber, bool readValue, ref int value)
+        {
+            if (!_systemVariablesSupported)
+            {
+                value = 0;
+                return false;
+            }
+
+            FirmataCommandSequence cmd = new FirmataCommandSequence();
+            cmd.WriteByte((byte)FirmataSysexCommand.SYSTEM_VARIABLE);
+            cmd.WriteByte((byte)(readValue ? 0 : 1)); // Query or set
+            cmd.WriteByte(1); // Data type: Integer
+            cmd.WriteByte(0); // Status (irrelevant)
+            cmd.SendInt14((int)variableId);
+            if (pinNumber < 127 && pinNumber >= 0)
+            {
+                cmd.WriteByte((byte)pinNumber);
+            }
+            else
+            {
+                cmd.WriteByte(127);
+            }
+
+            if (readValue)
+            {
+                // Don't send garbage in case of a read request.
+                value = 0;
+            }
+
+            cmd.SendInt32(value);
+            cmd.WriteByte((byte)FirmataCommand.END_SYSEX);
+
+            byte[] reply = SendCommandAndWait(cmd, DefaultReplyTimeout, (sequence, bytes) =>
+            {
+                if (bytes.Length < 12)
+                {
+                    return false;
+                }
+
+                if (bytes[0] != (byte)FirmataSysexCommand.SYSTEM_VARIABLE)
+                {
+                    return false;
+                }
+
+                // Reply must be for the same pin and the same variable Id.
+                int replyPin = bytes[6];
+                if (replyPin == 127)
+                {
+                    replyPin = -1;
+                }
+
+                if (replyPin != pinNumber)
+                {
+                    return false;
+                }
+
+                int id = FirmataCommandSequence.DecodeInt14(bytes, 4);
+                if (id != (int)variableId)
+                {
+                    return false;
+                }
+
+                return true;
+            }, out var error);
+
+            _lastCommandError = error;
+
+            if (error != CommandError.None)
+            {
+                throw new IOException($"Unable to query {variableId}. Command returned status {error}");
+            }
+
+            SystemVariableError status = (SystemVariableError)reply[3];
+            if (!CheckVariableReplyStatus(variableId, status))
+            {
+                value = 0;
+                return false;
+            }
+
+            int replyType = reply[2];
+            if (replyType != 1)
+            {
+                // The firmware indicates that the type of the value is something else than int. This is a problem for now.
+                throw new NotSupportedException($"Firmware reports an unknown data type: {replyType}");
+            }
+
+            value = FirmataCommandSequence.DecodeInt32(reply, 7);
+            return true;
+        }
+
+        private bool CheckVariableReplyStatus(SystemVariable variableId, SystemVariableError status)
+        {
+            switch (status)
+            {
+                case SystemVariableError.FieldReadOnly:
+                    _logger.LogError($"Field {variableId} is read-only");
+                    return false;
+                case SystemVariableError.FieldWriteOnly:
+                    _logger.LogError($"Field {variableId} is write-only");
+                    return false;
+                case SystemVariableError.GenericError:
+                    _logger.LogError($"There was an error processing the request");
+                    return false;
+                case SystemVariableError.UnknownDataType:
+                    _logger.LogError($"The data type is not supported");
+                    return false;
+                case SystemVariableError.UnknownVariableId:
+                    _logger.LogError($"The variable id {variableId} is not supported");
+                    return false;
+            }
+
+            return true;
         }
 
         public void EnableSpi()
@@ -1149,13 +1394,13 @@ namespace Iot.Device.Arduino
             SendCommand(disableSpi);
         }
 
-        public void SpiWrite(int csPin, ReadOnlySpan<byte> writeBytes, bool waitForReply = false)
+        public void SpiWrite(int csPin, ReadOnlySpan<byte> writeBytes, bool waitForReply)
         {
             // When the command is SPI_WRITE, the device answer is already discarded in the firmware.
             if (waitForReply)
             {
-                var command = SpiWrite(csPin, FirmataSpiCommand.SPI_WRITE_ACK, writeBytes, out byte requestId);
-                var response = SendCommandAndWait(command, DefaultReplyTimeout, (sequence, bytes) =>
+                FirmataCommandSequence command = SpiWrite(csPin, FirmataSpiCommand.SPI_WRITE_ACK, writeBytes, out byte requestId);
+                byte[] response = SendCommandAndWait(command, DefaultReplyTimeout, (sequence, bytes) =>
                 {
                     if (bytes.Length < 5)
                     {
@@ -1187,15 +1432,15 @@ namespace Iot.Device.Arduino
             }
             else
             {
-                var command = SpiWrite(csPin, FirmataSpiCommand.SPI_WRITE, writeBytes, out _);
+                FirmataCommandSequence command = SpiWrite(csPin, FirmataSpiCommand.SPI_WRITE, writeBytes, out _);
                 SendCommand(command);
             }
         }
 
         public void SpiTransfer(int csPin, ReadOnlySpan<byte> writeBytes, Span<byte> readBytes)
         {
-            var command = SpiWrite(csPin, FirmataSpiCommand.SPI_TRANSFER, writeBytes, out byte requestId);
-            var response = SendCommandAndWait(command, DefaultReplyTimeout, (sequence, bytes) =>
+            FirmataCommandSequence command = SpiWrite(csPin, FirmataSpiCommand.SPI_TRANSFER, writeBytes, out byte requestId);
+            byte[] response = SendCommandAndWait(command, DefaultReplyTimeout, (sequence, bytes) =>
             {
                 if (bytes.Length < 5)
                 {

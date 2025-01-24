@@ -52,6 +52,16 @@ namespace Iot.Device.Nmea0183
         }
 
         /// <summary>
+        /// Creates a magnetic deviation correction from the given XML stream
+        /// </summary>
+        /// <param name="stream">The stream to parse</param>
+        public MagneticDeviationCorrection(Stream stream)
+            : this()
+        {
+            Load(stream);
+        }
+
+        /// <summary>
         /// Returns the identification of the vessel for which the loaded calibration is valid
         /// </summary>
         public Identification? Identification
@@ -79,7 +89,18 @@ namespace Iot.Device.Nmea0183
         }
 
         /// <summary>
-        /// Tries to calculate a correction from the given recorded file, indicating the timespan where the calibration loops were performed.
+        /// Tries to calculate a correction from the given recorded file.
+        /// The recorded file should contain a data set where the vessel is turning two slow circles, one with the clock and one against the clock,
+        /// in calm conditions and with no current.
+        /// </summary>
+        /// <param name="stream">The recorded nmea stream (from a logged session)</param>
+        public void CreateCorrectionTable(Stream stream)
+        {
+            CreateCorrectionTable(new[] { stream }, DateTimeOffset.MinValue, DateTimeOffset.MaxValue);
+        }
+
+        /// <summary>
+        /// Tries to calculate a correction from the given recorded files, indicating the timespan where the calibration loops were performed.
         /// The recorded file should contain a data set where the vessel is turning two slow circles, one with the clock and one against the clock,
         /// in calm conditions and with no current.
         /// </summary>
@@ -88,11 +109,37 @@ namespace Iot.Device.Nmea0183
         /// <param name="endCalibration">The end time of the calibration loops</param>
         public void CreateCorrectionTable(string[] fileSet, DateTimeOffset beginCalibration, DateTimeOffset endCalibration)
         {
+            Stream[] streams = new Stream[fileSet.Length];
+            for (int i = 0; i < fileSet.Length; i++)
+            {
+                streams[i] = new FileStream(fileSet[i], FileMode.Open);
+            }
+
+            CreateCorrectionTable(streams, beginCalibration, endCalibration);
+
+            foreach (var s in streams)
+            {
+                s.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Tries to calculate a correction from the given recorded file strems, indicating the timespan where the calibration loops were performed.
+        /// The recorded file should contain a data set where the vessel is turning two slow circles, one with the clock and one against the clock,
+        /// in calm conditions and with no current.
+        /// </summary>
+        /// <param name="fileSet">The recorded nmea files (from a logged session)</param>
+        /// <param name="beginCalibration">The start time of the calibration loops</param>
+        /// <param name="endCalibration">The end time of the calibration loops</param>
+        /// <returns>A list of observed warnings</returns>
+        public List<string> CreateCorrectionTable(Stream[] fileSet, DateTimeOffset beginCalibration, DateTimeOffset endCalibration)
+        {
             _interestingSentences.Clear();
             _magneticVariation = Angle.Zero;
             _rawData = new RawData();
             var rawCompass = new List<MagneticReading>();
             var rawTrack = new List<GnssReading>();
+            List<string> warnings = new List<string>();
 
             void MessageFilter(NmeaSinkAndSource nmeaSinkAndSource, NmeaSentence nmeaSentence)
             {
@@ -169,11 +216,11 @@ namespace Iot.Device.Nmea0183
             NmeaLogDataReader reader = new NmeaLogDataReader("Reader", fileSet);
             reader.OnNewSequence += MessageFilter;
             reader.StartDecode();
+            reader.StopDecode();
             reader.Dispose();
             _rawData.Compass = rawCompass.ToArray();
             _rawData.Track = rawTrack.ToArray();
             DeviationPoint[] circle = new DeviationPoint[360]; // One entry per degree
-            string[] pointsWithProblems = new string[360];
             // This will get the average offset, which is assumed to be orientation independent (i.e. if the magnetic compass's forward
             // direction doesn't properly align with the ship)
             double averageOffset = 0;
@@ -217,7 +264,6 @@ namespace Iot.Device.Nmea0183
             const int maxConsecutiveGaps = 5;
             // Evaluate the quality of the result
             DeviationPoint? previous = null;
-            double maxLocalChange = 0;
             for (int i = 0; i < 360; i++)
             {
                 var pt = circle[i];
@@ -233,28 +279,11 @@ namespace Iot.Device.Nmea0183
                 {
                     if (Math.Abs(pt.Deviation + averageOffset) > 30)
                     {
-                        pointsWithProblems[i] = ($"Your magnetic compass shows deviations of more than 30 degrees. Use a better installation location or buy a new one.");
+                        warnings.Add($"Your magnetic compass shows deviations of {pt.Deviation + averageOffset} degrees. Use a better installation location or buy a new one.");
                     }
 
                     numberOfConsecutiveGaps = 0;
-                    if (previous != null)
-                    {
-                        if (Math.Abs(previous.Deviation - pt.Deviation) > maxLocalChange)
-                        {
-                            maxLocalChange = Math.Abs(previous.Deviation - pt.Deviation);
-                            pointsWithProblems[i] = $"Big deviation change near heading {i}";
-                        }
-                    }
-
                     previous = pt;
-                }
-            }
-
-            for (int i = 0; i < 360; i++)
-            {
-                if (pointsWithProblems[i] != null)
-                {
-                    circle[i] = null!;
                 }
             }
 
@@ -308,6 +337,8 @@ namespace Iot.Device.Nmea0183
             }
 
             _deviationPointsToCompassReading = circle;
+
+            return warnings;
         }
 
         private static void CalculateSmoothing(DeviationPoint[] circle)
@@ -391,6 +422,18 @@ namespace Iot.Device.Nmea0183
         /// </summary>
         /// <param name="file">The file from which to load</param>
         public void Load(string file)
+        {
+            using (var fs = new FileStream(file, FileMode.Open))
+            {
+                Load(fs);
+            }
+        }
+
+        /// <summary>
+        /// Loads a previously saved calibration set
+        /// </summary>
+        /// <param name="file">The stream from which to load</param>
+        public void Load(Stream file)
         {
             XmlSerializer ser = new XmlSerializer(typeof(CompassCalibration));
 

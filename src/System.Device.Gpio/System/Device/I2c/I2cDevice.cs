@@ -1,6 +1,8 @@
 ﻿// Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Globalization;
+
 namespace System.Device.I2c;
 
 /// <summary>
@@ -35,7 +37,13 @@ public abstract partial class I2cDevice : IDisposable
     /// Reads a byte from the I2C device.
     /// </summary>
     /// <returns>A byte read from the I2C device.</returns>
-    public abstract byte ReadByte();
+    public virtual unsafe byte ReadByte()
+    {
+        byte value = 0;
+        Span<byte> toRead = new Span<byte>(&value, 1);
+        Read(toRead);
+        return value;
+    }
 
     /// <summary>
     /// Reads data from the I2C device.
@@ -50,7 +58,11 @@ public abstract partial class I2cDevice : IDisposable
     /// Writes a byte to the I2C device.
     /// </summary>
     /// <param name="value">The byte to be written to the I2C device.</param>
-    public abstract void WriteByte(byte value);
+    public virtual unsafe void WriteByte(byte value)
+    {
+        ReadOnlySpan<byte> toWrite = new ReadOnlySpan<byte>(&value, 1);
+        Write(toWrite);
+    }
 
     /// <summary>
     /// Writes data to the I2C device.
@@ -73,6 +85,21 @@ public abstract partial class I2cDevice : IDisposable
     /// The length of the buffer determines how much data to read from the I2C device.
     /// </param>
     public abstract void WriteRead(ReadOnlySpan<byte> writeBuffer, Span<byte> readBuffer);
+
+    /// <summary>
+    /// Query information about a component and it's children.
+    /// </summary>
+    /// <returns>A tree of <see cref="ComponentInformation"/> instances.</returns>
+    /// <remarks>
+    /// This method is currently reserved for debugging purposes. Its behavior its and signature are subject to change.
+    /// </remarks>
+    public virtual ComponentInformation QueryComponentInformation()
+    {
+        var self = new ComponentInformation(this, "Generic I2C Device base");
+        self.Properties["BusNo"] = ConnectionSettings.BusId.ToString(CultureInfo.InvariantCulture);
+        self.Properties["DeviceAddress"] = $"0x{ConnectionSettings.DeviceAddress:x2}";
+        return self;
+    }
 
     /// <inheritdoc cref="IDisposable.Dispose"/>
     public void Dispose()
